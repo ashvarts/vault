@@ -319,6 +319,7 @@ func handleLogicalRecovery(raw *vault.RawBackend, token *atomic.String) http.Han
 		if resp != nil {
 			httpResp = logical.LogicalResponseToHTTPResponse(resp)
 			httpResp.RequestID = req.ID
+			httpResp.RequestTimestamp = time.Now().UTC()
 		}
 		respondOk(w, httpResp)
 	})
@@ -402,6 +403,7 @@ func respondLogical(core *vault.Core, w http.ResponseWriter, r *http.Request, re
 		} else {
 			httpResp = logical.LogicalResponseToHTTPResponse(resp)
 			httpResp.RequestID = req.ID
+			httpResp.RequestTimestamp = time.Now().UTC()
 		}
 
 		ret = httpResp

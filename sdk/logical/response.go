@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"sync/atomic"
+	"time"
 
 	"github.com/hashicorp/vault/sdk/helper/wrapping"
 )
@@ -177,6 +178,7 @@ func RespondWithStatusCode(resp *Response, req *Request, code int) (*Response, e
 
 		if req != nil {
 			httpResp.RequestID = req.ID
+			httpResp.RequestTimestamp = time.Now().UTC()
 		}
 
 		body, err := json.Marshal(httpResp)
