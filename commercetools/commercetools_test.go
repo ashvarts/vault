@@ -208,13 +208,16 @@ func setupClusterAndAgentCommon(ctx context.Context, t *testing.T, coreConfig *v
 	origEnvVaultCACert := os.Getenv(api.EnvVaultCACert)
 	os.Setenv(api.EnvVaultCACert, fmt.Sprintf("%s/ca_cert.pem", cluster.TempDir))
 
-	cacheLogger := logging.NewVaultLogger(hclog.Trace).Named("cache")
+	// cacheLogger := vault.NewTestLogger(t)
+
+	// cacheLogger.SetLevel(hclog.Debug)
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 
+	cacheLogger := logging.NewVaultLogger(hclog.Trace).Named("cache")
 	// Create the API proxier
 	apiProxy, err := cache.NewAPIProxy(&cache.APIProxyConfig{
 		Client: clienToUse,
@@ -230,7 +233,7 @@ func setupClusterAndAgentCommon(ctx context.Context, t *testing.T, coreConfig *v
 		Client:      clienToUse,
 		BaseContext: ctx,
 		Proxier:     apiProxy,
-		Logger:      cacheLogger.Named("leasecache"),
+		Logger:      cacheLogger,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -284,9 +287,11 @@ func setupClusterAndAgentCommon(ctx context.Context, t *testing.T, coreConfig *v
 }
 
 func TestVault(t *testing.T) {
+	logger := logging.NewVaultLogger(hclog.Debug).Named("testvault")
 	cluster := vault.NewTestCluster(t,
 		&vault.CoreConfig{},
 		&vault.TestClusterOptions{
+			Logger:      logger,
 			HandlerFunc: vaulthttp.Handler,
 		})
 	cluster.Start()
@@ -400,9 +405,13 @@ func TestVault(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Create the lease cache proxier and set its underlying proxier to
+	// the API proxier.
+
 	// Create the API proxier
 	apiProxy, err := cache.NewAPIProxy(&cache.APIProxyConfig{
 		Client: clientAppRole,
+		Logger: logger.Named("proxy"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -410,15 +419,13 @@ func TestVault(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Create the lease cache proxier and set its underlying proxier to
-	// the API proxier.
-	cacheLogger := logging.NewVaultLogger(hclog.Trace).Named("cache")
+	leaselogger := logger.Named("leasecache")
 
 	leaseCache, err := cache.NewLeaseCache(&cache.LeaseCacheConfig{
 		Client:      clientAppRole,
 		BaseContext: ctx,
 		Proxier:     apiProxy,
-		Logger:      cacheLogger.Named("leasecache"),
+		Logger:      leaselogger,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -428,20 +435,20 @@ func TestVault(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.Handle("/agent/v1/cache-clear", leaseCache.HandleCacheClear(ctx))
 
-	mux.Handle("/", cache.Handler(ctx, cacheLogger, leaseCache, nil, true))
+	mux.Handle("/", cache.Handler(ctx, leaselogger, leaseCache, nil, true))
 	server := &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		IdleTimeout:       5 * time.Minute,
-		ErrorLog:          cacheLogger.StandardLogger(nil),
+		ErrorLog:          logger.StandardLogger(nil),
 	}
 	go server.Serve(listener)
 
-	if err := client.SetAddress("http://" + listener.Addr().String()); err != nil {
+	if err := clientAppRole.SetAddress("http://" + listener.Addr().String()); err != nil {
 		t.Fatal(err)
 	}
-
+	//TODO: have three clients; root, cache/proxy (with address of server), approle(with address of cache/proxy)
 	// Login
 	activeClient, err := clientAppRole.Clone()
 	if err != nil {
@@ -454,7 +461,7 @@ func TestVault(t *testing.T) {
 	_ = resp
 	activeClient.SetToken(resp.Auth.ClientToken)
 
-	// time.Sleep(20 * time.Second)
+	time.Sleep(11 * time.Second)
 
 	resp, err = activeClient.Logical().Write("auth/token/renew-self", map[string]interface{}{})
 	if err != nil {
@@ -475,5 +482,6 @@ func TestVault(t *testing.T) {
 	// 		"policies":"default,myapp-read"
 	// 	}`)
 	// request(t, serverClient, req, 204)
+	t.Log(">>>>>>>>>>>>>>>>>>>>>>>>>>>>bottom")
 
 }
