@@ -319,13 +319,14 @@ func TestVault(t *testing.T) {
 		}
 
 	path "auth/token/renew-self" {
-			capabilities = ["update"]
+			capabilities = ["update", "create"]
 		}
 		`
 	if err := client.Sys().PutPolicy("kv-policy", policy); err != nil {
 		t.Fatal(err)
 	}
 
+	//establish the test-role with "kv-policy"
 	_, err = client.Logical().Write("auth/approle/role/test-role", map[string]interface{}{
 		"token_ttl":      "5",
 		"token_max_ttl":  "10",
@@ -358,7 +359,15 @@ func TestVault(t *testing.T) {
 	_ = secretID
 
 	// Login
-	resp, err = client.Logical().Write("auth/approle/login", map[string]interface{}{
+
+	// Create new client using appRole token
+	clientAppRole, err := client.Clone()
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientAppRole.ClearToken()
+
+	resp, err = clientAppRole.Logical().Write("auth/approle/login", map[string]interface{}{
 		"role_id":   roleID,
 		"secret_id": secretID,
 	})
@@ -375,19 +384,16 @@ func TestVault(t *testing.T) {
 		t.Fatal("expected a client token")
 	}
 	clientToken := resp.Auth.ClientToken
-	_ = clientToken
-
-	// Create new client using appRole token
-	clientAppRole, err := client.Clone()
-	if err != nil {
-		t.Fatal(err)
-	}
 	clientAppRole.SetToken(clientToken)
 
 	// Renew token
 	resp, err = clientAppRole.Logical().Write("auth/token/renew-self", map[string]interface{}{})
 	_ = resp
 
+	if err != nil {
+		t.Fatal("could not renew", err)
+	}
+	t.Log(">>>>>>>>>>>>>>>>>>>>>Renewed token", err)
 	// Create the API proxier
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
