@@ -16,6 +16,7 @@ import (
 	"github.com/hashicorp/vault/builtin/credential/userpass"
 	"github.com/hashicorp/vault/command/agent/cache"
 	vaulthttp "github.com/hashicorp/vault/http"
+	"github.com/hashicorp/vault/sdk/helper/consts"
 	"github.com/hashicorp/vault/sdk/helper/logging"
 	"github.com/hashicorp/vault/sdk/logical"
 	"github.com/hashicorp/vault/vault"
@@ -483,5 +484,106 @@ func TestVault(t *testing.T) {
 	// 	}`)
 	// request(t, serverClient, req, 204)
 	t.Log(">>>>>>>>>>>>>>>>>>>>>>>>>>>>bottom")
+
+}
+
+// newLeaseCacheProxier starts a proxied lease cache server
+// and returns the address
+func newLeaseCacheProxier(client *api.Client, count string) string {
+	listener, _ := net.Listen("tcp", "127.0.0.1:0")
+
+	// Create the API proxier
+	cacheLogger := logging.NewVaultLogger(hclog.Trace).Named("cache")
+	proxy, _ := cache.NewAPIProxy(&cache.APIProxyConfig{
+		Client: client,
+		Logger: cacheLogger.Named(fmt.Sprintf("apiproxy%s", count)),
+	})
+
+	// Create the lease cache proxier and set its underlying proxier to
+	// the API proxier.
+	ctx := context.Background()
+	leaseCache, _ := cache.NewLeaseCache(&cache.LeaseCacheConfig{
+		Client:      client,
+		BaseContext: ctx,
+		Proxier:     proxy,
+		Logger:      cacheLogger.Named(fmt.Sprintf("leasecache%s", count)),
+	})
+
+	// Create a muxer and add paths relevant for the lease cache layer
+	mux := http.NewServeMux()
+	mux.Handle(consts.AgentPathCacheClear, leaseCache.HandleCacheClear(ctx))
+
+	// Passing a non-nil inmemsink tells the agent to use the auto-auth token
+	mux.Handle("/", cache.Handler(ctx, cacheLogger, leaseCache, nil, true))
+	server := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 100 * time.Second,
+		ReadTimeout:       300 * time.Second,
+		IdleTimeout:       5 * time.Minute,
+		ErrorLog:          cacheLogger.StandardLogger(nil),
+	}
+
+	go server.Serve(listener)
+	return listener.Addr().String()
+}
+
+func setupVaultCluster(t *testing.T, coreConfig *vault.CoreConfig) *vault.TestCluster {
+	t.Helper()
+
+	// Handle sane defaults
+	if coreConfig == nil {
+		coreConfig = &vault.CoreConfig{
+			DisableMlock: true,
+			DisableCache: true,
+			Logger:       hclog.NewNullLogger(),
+		}
+	}
+
+	// Always set up the userpass backend since we use that to generate an admin
+	// token for the client that will make proxied requests to through the agent.
+	if coreConfig.CredentialBackends == nil || coreConfig.CredentialBackends["userpass"] == nil {
+		coreConfig.CredentialBackends = map[string]logical.Factory{
+			"userpass": userpass.Factory,
+		}
+	}
+
+	// Init new test cluster
+	cluster := vault.NewTestCluster(t, coreConfig, &vault.TestClusterOptions{
+		HandlerFunc: vaulthttp.Handler,
+	})
+	cluster.Start()
+	vault.TestWaitActive(t, cluster.Cores[0].Core)
+	return cluster
+}
+
+func TestVaultAndProxyAgents(t *testing.T) {
+	logger := logging.NewVaultLogger(hclog.Trace)
+	logger.Trace("ARTHUR SAYS HI")
+
+	cluster := setupVaultCluster(t, nil)
+	clusterClient := cluster.Cores[0].Client
+
+	proxyAddr1 := newLeaseCacheProxier(clusterClient, "1")
+
+	testClient, _ := clusterClient.Clone()
+	if err := testClient.SetAddress("http://" + proxyAddr1); err != nil {
+		t.Fatal(err)
+	}
+
+	proxyAddr2 := newLeaseCacheProxier(testClient, "2")
+	testClient2, _ := clusterClient.Clone()
+
+	if err := testClient2.SetAddress("http://" + proxyAddr2); err != nil {
+		t.Fatal(err)
+	}
+
+	testClient = testClient2
+	r := testClient.NewRequest("GET", "/v1/sys/health")
+
+	resp, err := testClient.RawRequest(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger.Trace(fmt.Sprintf("%#v", resp.Response))
 
 }
