@@ -493,10 +493,10 @@ func newLeaseCacheProxier(client *api.Client, count string) string {
 	listener, _ := net.Listen("tcp", "127.0.0.1:0")
 
 	// Create the API proxier
-	cacheLogger := logging.NewVaultLogger(hclog.Trace).Named("cache")
+	cacheLogger := logging.NewVaultLogger(hclog.Trace).Named(fmt.Sprintf("leaseCache%s", count))
 	proxy, _ := cache.NewAPIProxy(&cache.APIProxyConfig{
 		Client: client,
-		Logger: cacheLogger.Named(fmt.Sprintf("apiproxy%s", count)),
+		Logger: cacheLogger.Named("apiproxy"),
 	})
 
 	// Create the lease cache proxier and set its underlying proxier to
@@ -506,7 +506,7 @@ func newLeaseCacheProxier(client *api.Client, count string) string {
 		Client:      client,
 		BaseContext: ctx,
 		Proxier:     proxy,
-		Logger:      cacheLogger.Named(fmt.Sprintf("leasecache%s", count)),
+		Logger:      cacheLogger.Named("leasecache"),
 	})
 
 	// Create a muxer and add paths relevant for the lease cache layer
@@ -529,13 +529,14 @@ func newLeaseCacheProxier(client *api.Client, count string) string {
 
 func setupVaultCluster(t *testing.T, coreConfig *vault.CoreConfig) *vault.TestCluster {
 	t.Helper()
+	vaultLogger := logging.NewVaultLogger(hclog.Trace).Named("vault")
 
 	// Handle sane defaults
 	if coreConfig == nil {
 		coreConfig = &vault.CoreConfig{
 			DisableMlock: true,
 			DisableCache: true,
-			Logger:       hclog.NewNullLogger(),
+			Logger:       vaultLogger,
 		}
 	}
 
