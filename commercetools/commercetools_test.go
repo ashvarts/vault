@@ -564,10 +564,12 @@ func TestVaultAndProxyAgents(t *testing.T) {
 
 	cluster, roleID, secretID := setupVaultClusterWithApprole(t)
 	clusterClient := cluster.Cores[0].Client
+	clusterClient.ClearToken() //clear token so that we're sure not be using the admin token
 
 	proxyAddr1 := newLeaseCacheProxier(clusterClient, "1")
 
 	testClient, _ := clusterClient.Clone()
+
 	if err := testClient.SetAddress("http://" + proxyAddr1); err != nil {
 		t.Fatal(err)
 	}
@@ -587,8 +589,11 @@ func TestVaultAndProxyAgents(t *testing.T) {
 	// 	t.Fatal(err)
 	// }
 	// logger.Trace(fmt.Sprintf("%#v", resp.Response))
-
+	logger.Trace("TOKEN=")
+	logger.Trace(testClient.Token())
 	logger.Trace("FIRST APPROLE LOGIN")
+	testClient.ClearToken()
+	logger.Trace(testClient.Token())
 	respSecret, err := testClient.Logical().Write("auth/approle/login", map[string]interface{}{
 		"role_id":   roleID,
 		"secret_id": secretID,
@@ -606,9 +611,27 @@ func TestVaultAndProxyAgents(t *testing.T) {
 		t.Fatal("expected a client token")
 	}
 
-	logger.Trace(fmt.Sprintf("%#v", respSecret))
+	logger.Trace(fmt.Sprintf("%#v", respSecret.Auth))
+	testClient.SetToken(respSecret.Auth.ClientToken)
+	logger.Trace(testClient.Token())
 
 	time.Sleep(60 * time.Second)
+
+	// logger.Trace("*********TRIGGER RENEW")
+	// respSecret, err = testClient.Logical().Write("auth/token/renew-self", map[string]interface{}{})
+	// if err != nil {
+	// 	t.Fatal(err)
+	// }
+	// if respSecret == nil {
+	// 	t.Fatal("expected a response for login")
+	// }
+	// if respSecret.Auth == nil {
+	// 	t.Fatal("expected auth object from response")
+	// }
+	// if respSecret.Auth.ClientToken == "" {
+	// 	t.Fatal("expected a client token")
+	// }
+	// time.Sleep(30 * time.Second)
 }
 
 // Setup Vault Server with AppRole backend.
@@ -641,7 +664,7 @@ func setupVaultClusterWithApprole(t *testing.T) (*vault.TestCluster, string, str
 	//establish the test-role with "kv-policy"
 	_, err = client.Logical().Write("auth/approle/role/test-role", map[string]interface{}{
 		"token_ttl":     "5",
-		"token_max_ttl": "10",
+		"token_max_ttl": "5",
 	})
 	if err != nil {
 		t.Fatal(err)
