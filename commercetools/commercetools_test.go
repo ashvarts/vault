@@ -13,6 +13,7 @@ import (
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/vault/api"
+	"github.com/hashicorp/vault/builtin/credential/approle"
 	"github.com/hashicorp/vault/builtin/credential/userpass"
 	"github.com/hashicorp/vault/command/agent/cache"
 	vaulthttp "github.com/hashicorp/vault/http"
@@ -561,7 +562,7 @@ func TestVaultAndProxyAgents(t *testing.T) {
 	logger := logging.NewVaultLogger(hclog.Trace)
 	logger.Trace("ARTHUR SAYS HI")
 
-	cluster := setupVaultCluster(t, nil)
+	cluster, roleID, secretID := setupVaultClusterWithApprole(t)
 	clusterClient := cluster.Cores[0].Client
 
 	proxyAddr1 := newLeaseCacheProxier(clusterClient, "1")
@@ -579,12 +580,86 @@ func TestVaultAndProxyAgents(t *testing.T) {
 	}
 
 	testClient = testClient2
-	r := testClient.NewRequest("GET", "/v1/sys/health")
+	// r := testClient.NewRequest("GET", "/v1/sys/health")
 
-	resp, err := testClient.RawRequest(r)
+	// resp, err := testClient.RawRequest(r)
+	// if err != nil {
+	// 	t.Fatal(err)
+	// }
+	// logger.Trace(fmt.Sprintf("%#v", resp.Response))
+
+	logger.Trace("FIRST APPROLE LOGIN")
+	respSecret, err := testClient.Logical().Write("auth/approle/login", map[string]interface{}{
+		"role_id":   roleID,
+		"secret_id": secretID,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	logger.Trace(fmt.Sprintf("%#v", resp.Response))
+	if respSecret == nil {
+		t.Fatal("expected a response for login")
+	}
+	if respSecret.Auth == nil {
+		t.Fatal("expected auth object from response")
+	}
+	if respSecret.Auth.ClientToken == "" {
+		t.Fatal("expected a client token")
+	}
 
+	logger.Trace(fmt.Sprintf("%#v", respSecret))
+
+	time.Sleep(60 * time.Second)
+}
+
+// Setup Vault Server with AppRole backend.
+// TODO: and add approle credentials.
+// TODO: bindSecret, true or false?
+func setupVaultClusterWithApprole(t *testing.T) (*vault.TestCluster, string, string) {
+	t.Helper()
+	vaultLogger := logging.NewVaultLogger(hclog.Trace).Named("vault")
+
+	// Handle sane defaults
+
+	coreConfig := &vault.CoreConfig{
+		DisableMlock: true,
+		DisableCache: true,
+		Logger:       vaultLogger,
+		CredentialBackends: map[string]logical.Factory{
+			"approle": approle.Factory,
+		},
+	}
+
+	clusters := setupVaultCluster(t, coreConfig)
+	client := clusters.Cores[0].Client
+
+	err := client.Sys().EnableAuthWithOptions("approle", &api.EnableAuthOptions{
+		Type: "approle",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	//establish the test-role with "kv-policy"
+	_, err = client.Logical().Write("auth/approle/role/test-role", map[string]interface{}{
+		"token_ttl":     "5",
+		"token_max_ttl": "10",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Get RoleId
+	resp, err := client.Logical().Read("auth/approle/role/test-role/role-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	roleID := resp.Data["role_id"].(string)
+
+	// Get SecretId
+	resp, err = client.Logical().Write("auth/approle/role/test-role/secret-id", make(map[string]interface{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secretID := resp.Data["secret_id"].(string)
+
+	return clusters, roleID, secretID
 }
