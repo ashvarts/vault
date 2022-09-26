@@ -515,7 +515,8 @@ func newLeaseCacheProxier(client *api.Client, count string) string {
 	mux.Handle(consts.AgentPathCacheClear, leaseCache.HandleCacheClear(ctx))
 
 	// Passing a non-nil inmemsink tells the agent to use the auto-auth token
-	mux.Handle("/", cache.Handler(ctx, cacheLogger, leaseCache, nil, true))
+	cacheHandler := cache.Handler(ctx, cacheLogger, leaseCache, nil, true)
+	mux.Handle("/", cacheHandler)
 	server := &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 100 * time.Second,
@@ -574,26 +575,6 @@ func TestVaultAndProxyAgents(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	proxyAddr2 := newLeaseCacheProxier(testClient, "2")
-	testClient2, _ := clusterClient.Clone()
-
-	if err := testClient2.SetAddress("http://" + proxyAddr2); err != nil {
-		t.Fatal(err)
-	}
-
-	testClient = testClient2
-	// r := testClient.NewRequest("GET", "/v1/sys/health")
-
-	// resp, err := testClient.RawRequest(r)
-	// if err != nil {
-	// 	t.Fatal(err)
-	// }
-	// logger.Trace(fmt.Sprintf("%#v", resp.Response))
-	logger.Trace("TOKEN=")
-	logger.Trace(testClient.Token())
-	logger.Trace("FIRST APPROLE LOGIN")
-	testClient.ClearToken()
-	logger.Trace(testClient.Token())
 	respSecret, err := testClient.Logical().Write("auth/approle/login", map[string]interface{}{
 		"role_id":   roleID,
 		"secret_id": secretID,
@@ -611,12 +592,86 @@ func TestVaultAndProxyAgents(t *testing.T) {
 		t.Fatal("expected a client token")
 	}
 
+	testClient.SetToken(respSecret.Auth.ClientToken)
+
+	secret1, err := testClient.Logical().Write("auth/token/renew-self", map[string]interface{}{})
+	if err != nil {
+		t.Error("Failed renew-self", err)
+		t.Fatal()
+	}
+
+	logger.Trace("TOKEN LeaseDuration1=", secret1.Auth.LeaseDuration)
+	logger.Trace("SLEEPING TO AGE CREDENTIAL IN CACHE 1")
+	time.Sleep(15 * time.Second)
+
+	proxyAddr2 := newLeaseCacheProxier(testClient, "2")
+	testClient2, _ := clusterClient.Clone()
+	if err := testClient2.SetAddress("http://" + proxyAddr2); err != nil {
+		t.Fatal(err)
+	}
+	testClient2.SetToken(respSecret.Auth.ClientToken)
+	testClient1 := testClient
+	testClient = testClient2
+	secret2, err := testClient.Logical().Write("auth/token/renew-self", map[string]interface{}{})
+	if err != nil {
+		t.Error("Failed renew-self", fmt.Sprintf("%+v", testClient.Token()), err)
+	}
+	logger.Trace("TOKEN LeaseDuration2=", secret2.Auth.LeaseDuration)
+	secret1, _ = testClient1.Auth().Token().LookupSelf()
+	logger.Trace("TOKEN LeaseDuration1=", secret1.Data["ttl"])
+
+	time.Sleep(1 * time.Second)
+	_, err = testClient.Logical().Write("auth/token/renew-self", map[string]interface{}{})
+	if err != nil {
+		t.Error("Failed renew-self", fmt.Sprintf("%+v", testClient.Token()), err)
+	}
+	logger.Trace("GOODBYE")
+	t.Fatal()
+
+	respSecret, err = testClient.Logical().Write("auth/approle/login", map[string]interface{}{
+		"role_id":   roleID,
+		"secret_id": secretID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if respSecret == nil {
+		t.Fatal("expected a response for login")
+	}
+	if respSecret.Auth == nil {
+		t.Fatal("expected auth object from response")
+	}
+	if respSecret.Auth.ClientToken == "" {
+		t.Fatal("expected a client token")
+	}
+
+	// AT THIS POINT CACHE 2 HAS A CAHCED CREDENTIAL WITH A TTL OF 10?
+	time.Sleep(10 * time.Second)
+	t.Fatal()
+
 	logger.Trace(fmt.Sprintf("%#v", respSecret.Auth))
 	testClient.SetToken(respSecret.Auth.ClientToken)
 	logger.Trace(testClient.Token())
 
-	time.Sleep(60 * time.Second)
+	//time.Sleep(5 * time.Second)
 
+	logger.Trace(fmt.Sprintf("CALL APPROLE LOGIN AFTER SLEEP"))
+	respSecret, err = testClient.Logical().Write("auth/approle/login", map[string]interface{}{
+		"role_id":   roleID,
+		"secret_id": secretID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if respSecret == nil {
+		t.Fatal("expected a response for login")
+	}
+	if respSecret.Auth == nil {
+		t.Fatal("expected auth object from response")
+	}
+	if respSecret.Auth.ClientToken == "" {
+		t.Fatal("expected a client token")
+	}
 	// logger.Trace("*********TRIGGER RENEW")
 	// respSecret, err = testClient.Logical().Write("auth/token/renew-self", map[string]interface{}{})
 	// if err != nil {
@@ -661,10 +716,24 @@ func setupVaultClusterWithApprole(t *testing.T) (*vault.TestCluster, string, str
 	if err != nil {
 		t.Fatal(err)
 	}
-	//establish the test-role with "kv-policy"
+	policy := `
+	path "auth/token/lookup-self" {
+		capabilities = ["read"]
+	}
+
+	path "auth/token/renew-self" {
+		capabilities = ["update", "create"]
+	}
+	`
+	if err := client.Sys().PutPolicy("renewSelfAllow", policy); err != nil {
+		t.Fatal(err)
+	}
+
+	//establish the test-role with "renewSelfAllow"
 	_, err = client.Logical().Write("auth/approle/role/test-role", map[string]interface{}{
-		"token_ttl":     "5",
-		"token_max_ttl": "5",
+		"token_ttl":     "18",
+		"token_max_ttl": "18",
+		// "token_policies": []string{"renewSelfAllow"},
 	})
 	if err != nil {
 		t.Fatal(err)
